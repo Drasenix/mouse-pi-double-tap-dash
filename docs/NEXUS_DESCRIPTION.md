@@ -5,7 +5,7 @@ Double-tap a movement key to dash in MOUSE: P.I. For Hire.
 - ZQSD on AZERTY / WASD on QWERTY (physical keys).
 - The dash key is read from the game's runtime input binding, with a profile fallback.
   Rebinding Dash is followed within about 2 seconds.
-- Toggle in **Settings > Controls**: `Double-tap dash` (No/Yes).
+- Toggle in **Settings > Controls**: `Double-tap dash` (Yes/No, localized).
 
 ## Requirements
 

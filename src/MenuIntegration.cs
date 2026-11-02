@@ -27,15 +27,24 @@ namespace MouseDoubleTapDash
         private static Type _stepperType;
         private static Type _textType;
         private static object _rowNameText;
+        private static object _rowNameRow;
 
         private static Harmony _harmony;
-        private static bool _patched;
+        private static bool _patchAttempted;
+        private static bool _setupPatched;
+        private static bool _updateNamePatched;
+        private static bool _toggleRefreshPatched;
+        private static bool _stepperRefreshPatched;
+        private static bool _updateTextPatched;
         private static bool _injected;
         private static float _nextTryTime;
         private static float _nextSettingTryTime;
+        private static float _nextPatchTryTime;
         private static bool _syncing;
         private static bool _boolLabelsCopied;
         private static bool _errorLogged;
+
+        private const string MenuLabel = "Double-tap dash";
 
         public static void Initialize(ManualLogSource logger, Action<bool> onChanged, bool initial, bool verbose)
         {
@@ -57,8 +66,11 @@ namespace MouseDoubleTapDash
                 CreateSetting();
             }
 
-            if (!_patched)
+            if (!_patchAttempted && Time.unscaledTime >= _nextPatchTryTime)
+            {
+                _nextPatchTryTime = Time.unscaledTime + 2f;
                 ApplyPatches();
+            }
 
             if (!_injected && Time.unscaledTime >= _nextTryTime)
             {
@@ -154,7 +166,7 @@ namespace MouseDoubleTapDash
 
         private static void ApplyPatches()
         {
-            if (_patched)
+            if (_patchAttempted)
                 return;
 
             if (_pageType == null) _pageType = FindType("UI.Notebook.Settings.SettingsPageUI");
@@ -166,45 +178,84 @@ namespace MouseDoubleTapDash
             if (_pageType == null || _rowType == null || _toggleType == null)
                 return;
 
+            _patchAttempted = true;
+
             try
             {
-                _harmony = new Harmony("com.cono.mousedoubletapdash.menu");
+                if (_harmony == null)
+                    _harmony = new Harmony("com.cono.mousedoubletapdash.menu");
 
                 MethodInfo setup = FindMethod(_rowType, "Setup", 3);
                 MethodInfo updateName = FindMethod(_rowType, "UpdateName", 0);
                 MethodInfo refresh = FindMethod(_toggleType, "RefreshValueDisplay", 0);
-
-                if (setup != null)
-                    _harmony.Patch(setup, postfix: new HarmonyMethod(
-                        typeof(MenuIntegration).GetMethod(nameof(RowSetupPostfix), BindingFlags.Static | BindingFlags.NonPublic)));
-
-                if (updateName != null)
-                    _harmony.Patch(updateName, postfix: new HarmonyMethod(
-                        typeof(MenuIntegration).GetMethod(nameof(RowUpdatePostfix), BindingFlags.Static | BindingFlags.NonPublic)));
-
-                if (refresh != null)
-                    _harmony.Patch(refresh, postfix: new HarmonyMethod(
-                        typeof(MenuIntegration).GetMethod(nameof(ToggleRefreshPostfix), BindingFlags.Static | BindingFlags.NonPublic)));
-
                 MethodInfo stepperRefresh = _stepperType != null
                     ? FindMethod(_stepperType, "RefreshValueDisplay", 0)
                     : null;
-                if (stepperRefresh != null)
-                    _harmony.Patch(stepperRefresh, postfix: new HarmonyMethod(
-                        typeof(MenuIntegration).GetMethod(nameof(StepperRefreshPostfix), BindingFlags.Static | BindingFlags.NonPublic)));
-
                 MethodInfo updateText = _textType != null
                     ? FindMethod(_textType, "UpdateText", 1)
                     : null;
-                if (updateText != null)
+
+                if (!_setupPatched)
+                {
+                    if (setup != null)
+                    {
+                        _harmony.Patch(setup, postfix: new HarmonyMethod(
+                            typeof(MenuIntegration).GetMethod(nameof(RowSetupPostfix), BindingFlags.Static | BindingFlags.NonPublic)));
+                        _setupPatched = true;
+                    }
+                    else
+                    {
+                        LogError("Setup method not found");
+                    }
+                }
+
+                if (!_updateNamePatched)
+                {
+                    if (updateName != null)
+                    {
+                        _harmony.Patch(updateName, postfix: new HarmonyMethod(
+                            typeof(MenuIntegration).GetMethod(nameof(RowUpdatePostfix), BindingFlags.Static | BindingFlags.NonPublic)));
+                        _updateNamePatched = true;
+                    }
+                    else
+                    {
+                        LogError("UpdateName method not found");
+                    }
+                }
+
+                if (!_toggleRefreshPatched)
+                {
+                    if (refresh != null)
+                    {
+                        _harmony.Patch(refresh, postfix: new HarmonyMethod(
+                            typeof(MenuIntegration).GetMethod(nameof(ToggleRefreshPostfix), BindingFlags.Static | BindingFlags.NonPublic)));
+                        _toggleRefreshPatched = true;
+                    }
+                    else
+                    {
+                        LogError("Toggle RefreshValueDisplay method not found");
+                    }
+                }
+
+                if (!_stepperRefreshPatched && stepperRefresh != null)
+                {
+                    _harmony.Patch(stepperRefresh, postfix: new HarmonyMethod(
+                        typeof(MenuIntegration).GetMethod(nameof(StepperRefreshPostfix), BindingFlags.Static | BindingFlags.NonPublic)));
+                    _stepperRefreshPatched = true;
+                }
+
+                if (!_updateTextPatched && updateText != null)
+                {
                     _harmony.Patch(updateText, postfix: new HarmonyMethod(
                         typeof(MenuIntegration).GetMethod(nameof(LocalizedTextPostfix), BindingFlags.Static | BindingFlags.NonPublic)));
+                    _updateTextPatched = true;
+                }
 
-                _patched = true;
-                _logger.LogInfo("[MouseDoubleTapDash] menu Harmony patches applied");
+                _logger.LogInfo("[MouseDoubleTapDash] menu Harmony patch pass complete");
             }
             catch (Exception e)
             {
+                _patchAttempted = false;
                 LogError("ApplyPatches: " + e.Message);
             }
         }
@@ -388,27 +439,52 @@ namespace MouseDoubleTapDash
         private static void RowSetupPostfix(object __instance, object settingAsset)
         {
             if (!ReferenceEquals(settingAsset, _setting))
+            {
+                ClearRowLabel(__instance);
                 return;
+            }
 
+            _rowNameRow = __instance;
             OverrideRowLabel(__instance);
         }
 
         private static void RowUpdatePostfix(object __instance)
         {
-            try
+            object current = GetRowSetting(__instance);
+            if (current == null)
+                return;
+
+            if (!ReferenceEquals(current, _setting))
             {
-                PropertyInfo property = __instance.GetType().GetProperty("SettingAsset",
-                    BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-                object current = property?.GetValue(__instance);
-                if (!ReferenceEquals(current, _setting))
-                    return;
-            }
-            catch
-            {
+                ClearRowLabel(__instance);
                 return;
             }
 
+            _rowNameRow = __instance;
             OverrideRowLabel(__instance);
+        }
+
+        private static object GetRowSetting(object row)
+        {
+            try
+            {
+                PropertyInfo property = row.GetType().GetProperty("SettingAsset",
+                    BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                return property?.GetValue(row);
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private static void ClearRowLabel(object row)
+        {
+            if (ReferenceEquals(_rowNameRow, row))
+            {
+                _rowNameRow = null;
+                _rowNameText = null;
+            }
         }
 
         private static void ToggleRefreshPostfix(object __instance)
@@ -424,7 +500,7 @@ namespace MouseDoubleTapDash
 
                 object label = GetField(__instance, "label");
                 bool value = (bool)_getAsBool.Invoke(_setting, null);
-                OverrideText(label, value ? "Oui" : "Non");
+                OverrideText(label, value ? "Yes" : "No");
             }
             catch (Exception e)
             {
@@ -437,10 +513,11 @@ namespace MouseDoubleTapDash
             try
             {
                 object nameText = GetField(row, "nameText");
-                if (nameText != null)
-                    _rowNameText = nameText;
+                if (nameText == null)
+                    return;
 
-                OverrideText(nameText, "Double-tap dash");
+                _rowNameText = nameText;
+                OverrideText(nameText, MenuLabel);
             }
             catch (Exception e)
             {
@@ -453,9 +530,20 @@ namespace MouseDoubleTapDash
             if (_rowNameText == null || !ReferenceEquals(__instance, _rowNameText))
                 return;
 
+            if (_rowNameRow != null)
+            {
+                object current = GetRowSetting(_rowNameRow);
+                if (current != null && !ReferenceEquals(current, _setting))
+                {
+                    _rowNameRow = null;
+                    _rowNameText = null;
+                    return;
+                }
+            }
+
             try
             {
-                OverrideText(__instance, "Double-tap dash");
+                OverrideText(__instance, MenuLabel);
             }
             catch (Exception e)
             {
@@ -476,7 +564,7 @@ namespace MouseDoubleTapDash
 
                 object label = GetField(__instance, "label");
                 bool value = (bool)_getAsBool.Invoke(_setting, null);
-                OverrideText(label, value ? "Oui" : "Non");
+                OverrideText(label, value ? "Yes" : "No");
             }
             catch (Exception e)
             {

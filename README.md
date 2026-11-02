@@ -31,7 +31,7 @@ keeps working after a Dash rebind.
 1. Install the unstripped BepInEx package into the game root (the folder that
    contains `MOUSE.exe`).
 2. Launch the game once, then check that `BepInEx/LogOutput.log` exists.
-3. Extract `MouseDoubleTapDash-1.2.1.zip` into the game root. The result must be:
+3. Extract `MouseDoubleTapDash-1.2.2.zip` into the game root. The result must be:
 
    ```
    <game>/BepInEx/plugins/MouseDoubleTapDash.dll

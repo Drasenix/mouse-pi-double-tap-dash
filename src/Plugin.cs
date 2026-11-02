@@ -15,7 +15,7 @@ namespace MouseDoubleTapDash
     {
         public const string Guid = "com.cono.mousedoubletapdash";
         public const string Name = "Mouse Double Tap Dash";
-        public const string Version = "1.2.1";
+        public const string Version = "1.2.2";
 
         private ConfigEntry<bool> _enabled;
         private ConfigEntry<int> _windowMs;
@@ -58,12 +58,19 @@ namespace MouseDoubleTapDash
 
             Logger.LogInfo("[MouseDoubleTapDash] loaded v" + Version);
 
+            RemoveObsoleteConfig();
+            ApplyFallbackBindings();
+            TryInstallInputHooks();
             MenuIntegration.Initialize(Logger, OnMenuEnabledChanged, _enabled.Value, _verbose.Value);
-            ResolveInput(true);
         }
 
         private void Update()
         {
+            float now = Time.unscaledTime;
+
+            if (_syntheticPressActive && now >= _syntheticReleaseTime)
+                ReleaseSyntheticPress();
+
             MenuIntegration.Tick();
 
             if (_refreshRequested)
@@ -75,9 +82,12 @@ namespace MouseDoubleTapDash
             if (!_enabled.Value)
                 return;
 
-            if (Time.unscaledTime >= _nextResolveTime)
+            if (Keyboard.current == null)
+                return;
+
+            if (now >= _nextResolveTime)
             {
-                _nextResolveTime = Time.unscaledTime + 2f;
+                _nextResolveTime = now + (_activeResolved ? 10f : 2f);
                 ResolveInput(false);
             }
 
@@ -92,14 +102,6 @@ namespace MouseDoubleTapDash
 
             if (_dashAction != null && !_dashAction.enabled)
                 return;
-
-            if (Keyboard.current == null)
-                return;
-
-            float now = Time.unscaledTime;
-
-            if (_syntheticPressActive && now >= _syntheticReleaseTime)
-                ReleaseSyntheticPress();
 
             for (int i = 0; i < _moveKeys.Length; i++)
             {
@@ -127,13 +129,73 @@ namespace MouseDoubleTapDash
 
         private void OnMenuEnabledChanged(bool value)
         {
+            if (!value && _syntheticPressActive)
+                ReleaseSyntheticPress();
+
             _enabled.Value = value;
             Config.Save();
             Logger.LogInfo("[MouseDoubleTapDash] " + (value ? "ENABLED" : "DISABLED") + " (menu)");
         }
 
+        private void OnDestroy()
+        {
+            if (_syntheticPressActive)
+                ReleaseSyntheticPress();
+        }
+
+        private void RemoveObsoleteConfig()
+        {
+            try
+            {
+                ConfigDefinition obsolete = new ConfigDefinition("General", "ToggleKey");
+                Config.Remove(obsolete);
+
+                PropertyInfo orphanedProperty = typeof(ConfigFile).GetProperty("OrphanedEntries",
+                    BindingFlags.Instance | BindingFlags.NonPublic);
+                if (orphanedProperty != null &&
+                    orphanedProperty.GetValue(Config) is IDictionary<ConfigDefinition, string> orphaned)
+                {
+                    orphaned.Remove(obsolete);
+                }
+
+                Config.Save();
+            }
+            catch (Exception e)
+            {
+                Logger.LogWarning("[MouseDoubleTapDash] config migration failed: " + e.Message);
+            }
+        }
+
+        private void ApplyFallbackBindings()
+        {
+            _moveKeys[0] = Key.W;
+            _moveKeys[1] = Key.S;
+            _moveKeys[2] = Key.A;
+            _moveKeys[3] = Key.D;
+
+            Key profileDash = ReadProfileDashKey();
+            _dashKey = profileDash != Key.None ? profileDash : Key.LeftAlt;
+        }
+
+        private static void TryInstallInputHooks()
+        {
+            if (_inputHooksInstalled)
+                return;
+
+            Type inputManagerType = FindType("InputManager");
+            if (inputManagerType != null)
+                InstallInputHooks(inputManagerType);
+        }
+
         private void ResolveInput(bool logDetails)
         {
+            if (Keyboard.current == null)
+            {
+                if (logDetails)
+                    Logger.LogInfo("[MouseDoubleTapDash] input system not ready, waiting");
+                return;
+            }
+
             Key[] oldMoves = { _moveKeys[0], _moveKeys[1], _moveKeys[2], _moveKeys[3] };
             Key oldDash = _dashKey;
 
@@ -195,6 +257,11 @@ namespace MouseDoubleTapDash
             {
                 parsedDash = overrideDash;
                 dashSource = "override";
+            }
+            else if (!_bindingsLoaded && profileDash != Key.None)
+            {
+                parsedDash = profileDash;
+                dashSource = "profile-pending";
             }
             else if (active && assetDash != Key.None)
             {
@@ -304,13 +371,6 @@ namespace MouseDoubleTapDash
 
             try
             {
-                PropertyInfo instanceProperty = inputManagerType.GetProperty("Instance",
-                    BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.FlattenHierarchy);
-                object instance = instanceProperty?.GetValue(null);
-
-                if (instance != null && TryGetControlsAsset(instance, inputManagerType, out asset))
-                    return true;
-
                 UnityEngine.Object[] managers = Resources.FindObjectsOfTypeAll(inputManagerType);
                 if (managers != null)
                 {
@@ -343,14 +403,22 @@ namespace MouseDoubleTapDash
                     BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
 
                 Action handler = OnInputBindingsChanged;
+                bool installed = false;
 
                 if (loadField != null)
+                {
                     loadField.SetValue(null, (Action)Delegate.Combine((Action)loadField.GetValue(null), handler));
+                    installed = true;
+                }
 
                 if (saveField != null)
+                {
                     saveField.SetValue(null, (Action)Delegate.Combine((Action)saveField.GetValue(null), handler));
+                    installed = true;
+                }
 
-                _inputHooksInstalled = true;
+                if (installed)
+                    _inputHooksInstalled = true;
             }
             catch
             {
@@ -520,10 +588,19 @@ namespace MouseDoubleTapDash
             if (!_dashKeyWasHeldBefore)
                 pressed.Add(_dashKey);
 
-            InputSystem.QueueStateEvent(
-                Keyboard.current,
-                new KeyboardState(pressed.ToArray()),
-                InputState.currentTime);
+            try
+            {
+                InputSystem.QueueStateEvent(
+                    Keyboard.current,
+                    new KeyboardState(pressed.ToArray()),
+                    InputState.currentTime);
+            }
+            catch (Exception e)
+            {
+                if (_verbose.Value)
+                    Logger.LogWarning("[MouseDoubleTapDash] failed to queue dash key: " + e.Message);
+                return;
+            }
 
             _syntheticPressActive = true;
             _syntheticReleaseTime = now + 0.06f;
@@ -541,22 +618,32 @@ namespace MouseDoubleTapDash
                 return;
             }
 
-            var held = new List<Key>();
-            foreach (KeyControl control in Keyboard.current.allKeys)
+            try
             {
-                if (control != null && control.isPressed)
-                    held.Add(control.keyCode);
+                var held = new List<Key>();
+                foreach (KeyControl control in Keyboard.current.allKeys)
+                {
+                    if (control != null && control.isPressed)
+                        held.Add(control.keyCode);
+                }
+
+                if (!_dashKeyWasHeldBefore)
+                    held.RemoveAll(IsDashKey);
+
+                InputSystem.QueueStateEvent(
+                    Keyboard.current,
+                    new KeyboardState(held.ToArray()),
+                    InputState.currentTime);
             }
-
-            if (!_dashKeyWasHeldBefore)
-                held.RemoveAll(IsDashKey);
-
-            InputSystem.QueueStateEvent(
-                Keyboard.current,
-                new KeyboardState(held.ToArray()),
-                InputState.currentTime);
-
-            _syntheticPressActive = false;
+            catch (Exception e)
+            {
+                if (_verbose.Value)
+                    Logger.LogWarning("[MouseDoubleTapDash] failed to release dash key: " + e.Message);
+            }
+            finally
+            {
+                _syntheticPressActive = false;
+            }
         }
 
         private bool IsDashKey(Key key)
